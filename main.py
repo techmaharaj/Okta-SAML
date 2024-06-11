@@ -56,7 +56,7 @@ app = Flask(__name__)
 
 # Set the secret key to some random bytes. Keep this really secret!
 # This enables Flask session cookies
-app.secret_key = '^ovdD@8Sj3P!8&k$8dYzesadkadsakhdh^o3r5LUs7cPU2'
+app.secret_key = os.urandom(24)
 
 @app.route("/")
 def hello():
