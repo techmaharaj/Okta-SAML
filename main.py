@@ -87,7 +87,8 @@ def hello():
     else:
         metadata_url = BASE_URL + "/saml/metadata"
 
-        return render_template('template.html', is_authenticated=is_authenticated,
+        return render_template('template.html',
+                                is_authenticated=is_authenticated,
                                 metadata_url=metadata_url), 200
 
 
@@ -202,205 +203,11 @@ def acs():
 @app.route('/logout')
 def logout():
     """
-    Constructs a logout request for the SAML service provider.
-
-    Returns:
-        str: The HTML form containing the encoded logout request.
+    Clear the current session.
     """
-    client = saml_client_for(CONFIG)
-
-    # Ensure the user is logged in before proceeding
-    if not session.get('is_authenticated'):
-        return redirect(url_for('hello'))
-
-    # Construct the full path to the metadata file
-    metadata_file_path = os.path.join(os.path.dirname(__file__), CONFIG['metadata']['local'][0])
-    idp_metadata_file_path = os.path.abspath(metadata_file_path)
-    tree = ElementTree.parse(idp_metadata_file_path)
-    root = tree.getroot()
-
-    # Define the XML namespaces used in the metadata file
-    namespaces = {
-        'md': 'urn:oasis:names:tc:SAML:2.0:metadata',
-        'xsi': 'http://www.w3.org/2001/XMLSchema-instance'
-    }
-
-    # Find the SingleLogoutService element for HTTP POST binding and extract the URL
-    sls_element = root.find(".//md:IDPSSODescriptor/md:SingleLogoutService[@Binding='urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST']", namespaces)
-    idp_logout_endpoint = sls_element.get('Location') if sls_element is not None else None
-
-    if not idp_logout_endpoint:
-        debug_log("Could not find a Single Logout Service endpoint with POST binding in the IdP metadata.")
-        return "Error: No SLS endpoint found for IdP", 500
-    else:
-        debug_log(f"idp_logout_endpoint: {idp_logout_endpoint}")
-
-
-    # Create a NameID object with the user's name_id value in Persistent format
-    user_name_id = NameID(format=NAMEID_FORMAT_PERSISTENT, text=session.get('name_id'))
-    sp_entity_id = CONFIG['entityid']
-
-    # Create the LogoutRequest
-    try:
-        # The create_logout_request method returns a tuple: (request_id, logout_request_xml)
-        _, logout_request_xml = client.create_logout_request(
-            name_id=user_name_id,
-            destination=idp_logout_endpoint,  # Use the actual IdP's logout endpoint
-            issuer_entity_id=sp_entity_id
-        )
-        debug_log(f"Logout request XML: {logout_request_xml}")
-    except Exception as e:
-        debug_log(f"Error creating logout request: {e}")
-        return "Error creating logout request", 500
-
-    # Encode the LogoutRequest (typically base64)
-    debug_log(f"type(logout_request_xml): {type(logout_request_xml)}")
-
-    if isinstance(logout_request_xml, str):
-        # type str if authn_requests_signed': True (recommended)
-        # Convert string to bytes for base64 encoding
-        encoded_request = base64.b64encode(logout_request_xml.encode()).decode()
-    elif hasattr(logout_request_xml, 'to_string'):
-        # type <Logout Request> if  'authn_requests_signed': False!
-        # Use 'to_string' method if available and it's already a byte string
-        encoded_request = base64.b64encode(logout_request_xml.to_string()).decode()
-    else:
-        # Handle other unexpected cases or raise an error
-        raise TypeError(f"Unexpected type for logout_request_xml: {type(logout_request_xml)}")
-
-
-    # Create the HTML form using the encoded logout request
-    html_form = f"""
-    <html>
-        <body onload="document.forms[0].submit()">
-            <form method="POST" action="{idp_logout_endpoint}">
-                <input type="hidden" name="SAMLRequest" value="{encoded_request}">
-                <!-- Add a hidden RelayState field if required -->
-            </form>
-        </body>
-    </html>
-    """
-    return html_form
-
-@app.route('/saml/sls/', methods=['GET', 'POST'])
-def sls():
-    """
-    Process the Single Logout Service (SLS) request.
-
-    This function handles the SAML Single Logout (SLO) request.
-    It checks if the request contains a SAMLRequest or SAMLResponse parameter.
-    If a SAMLRequest is found, it parses the request, terminates the user's session,
-    creates a LogoutResponse, and returns a modified HTML response with a JavaScript snippet for redirection.
-    If a SAMLResponse is found, it parses the response, extracts specific information from the parsed XML,
-    clears the user's session, and redirects to a specified URL.
-
-    If neither SAMLRequest nor SAMLResponse is found, it returns an error message.
-
-    Returns:
-        str: The modified HTML response or an error message.
-    """
-    client = saml_client_for(CONFIG)
-
-    if 'SAMLRequest' in request.form:
-        try:
-            logout_request_encoded = request.form['SAMLRequest']
-
-            if logout_request_encoded:
-                logout_request = client.parse_logout_request(
-                    logout_request_encoded, BINDING_HTTP_REDIRECT)
-
-                # Terminate the user's session
-                session.clear()
-
-                xmlstr = logout_request.xmlstr.decode('utf-8')
-                debug_log(f"xmlstr.decode('utf-8'): {xmlstr}")
-                root = ElementTree.fromstring(xmlstr)
-                request_id = root.attrib.get('ID', None)
-                debug_log(f"Request ID: {request_id}")
-
-                if request_id:
-                    # Construct the logout response
-                    response_binding = BINDING_HTTP_POST 
-                    sign_post = True  
-                    sign_alg = None  
-                    digest_alg = None
-
-                    # Create the LogoutResponse
-                    response = client.create_logout_response(
-                                   logout_request.message,
-                                   bindings=[response_binding],
-                                   # status=status,  # Ensure 'status' is defined appropriately
-                                   sign=sign_post,
-                                   sign_alg=sign_alg,
-                                   digest_alg=digest_alg)
-
-                    # Get the response arguments
-                    rinfo = client.response_args(logout_request.message, [response_binding])
-
-                    # Apply the binding and get the HTTP response
-                    http_response = client.apply_binding(
-                                        rinfo["binding"],
-                                        response,
-                                        rinfo["destination"],
-                                        # relay_state,  # Ensure 'relay_state' is defined or received from the request
-                                        response=True,
-                                        sign=sign_post,
-                                        sigalg=sign_alg)
-
-
-                    # Extract the HTTP response and prepare for modification
-                    response_html = http_response['data']
-
-                    # Define the JavaScript snippet for redirection
-                    js_redirect = """
-    <script>
-        setTimeout(function() {{
-            window.location.href = '{}';
-        }}, 5000); // Redirect after 5 seconds
-    </script>
-""".format(url_for('hello')) 
-
-                    # Insert the JavaScript snippet into the HTML response
-                    response_html = response_html.replace('</body>', js_redirect + '</body>')
-
-                    debug_log(f"http_response before modification: {http_response}")
-                    debug_log(f"response_html: {response_html}")
-
-                    return response_html  # Return the modified HTML response
-
-        except Exception as e:
-            return f"Error processing SAMLRequest: {e}", 500
-
-    elif 'SAMLResponse' in request.form:
-        try:
-            logout_response_encoded = request.form['SAMLResponse']
-
-            if logout_response_encoded:
-                try:
-                    authn_response = client.parse_authn_request_response(logout_response_encoded,
-                                                                          entity.BINDING_HTTP_POST)
-                    debug_log(f"authn_response: {authn_response}")
-
-                    # Extract specific information from the parsed XML
-                    issuer = authn_response.issuer()
-                    status_ok = authn_response.status_ok()
-
-                    debug_log(f"Issuer: {issuer if issuer is not None else 'Not found'}")
-                    debug_log(f"Status OK: {status_ok}")
-
-                except ElementTree.ParseError as e:
-                    debug_log(f"Error parsing XML: {e}")
-
-            session.clear()
-            return redirect(url_for('hello'))
-
-        except Exception as e:
-            session.clear() 
-            return f"Error processing SAMLResponse: {e}", 500
-
-    else:
-        return "Invalid SLO request", 400
-
+    
+    session.clear()
+    return redirect(url_for('hello'))
 
 @app.route('/saml/metadata/')
 def metadata():
@@ -418,5 +225,5 @@ def metadata():
     return response
 
 if __name__ == "__main__":
-    app.run(debug=False, host='0.0.0.0', port=8443, ssl_context=('conf/sp_cert.pem', 'conf/sp_key.pem'))
+    app.run(debug=False, host='0.0.0.0', port=8443)
 
