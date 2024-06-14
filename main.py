@@ -168,26 +168,6 @@ def acs():
         session['profileUrl']= attributes.get('profileUrl',None)
         session['attributes'] = attributes
 
-        # Ensure the assertion object is a string
-        assertion_string = str(authn_response.assertion)
-
-        # Encode the string to bytes
-        assertion_bytes = assertion_string.encode('utf-8')
-
-        # Parse the XML string
-        root = ElementTree.fromstring(assertion_bytes)
-
-        # Find the AuthnStatement element
-        authn_statement = root.find('.//saml:AuthnStatement', namespaces={'saml': 'urn:oasis:names:tc:SAML:2.0:assertion'})
-
-        # Get the session index
-        session_index = authn_statement.attrib.get('SessionIndex')
-
-        # Print the session index
-        debug_log(f"Session index: {session_index}")
-
-        session['session_index'] = session_index
-
         return redirect(url_for('hello'))
 
     except Exception as e:
@@ -197,8 +177,6 @@ def acs():
         # Clear any existing session and display error
         session.clear()
         return f"EXCEPTION {e}", 403
-
-    # Load and parse the metadata XML file
 
 @app.route('/logout')
 def logout():
